@@ -454,6 +454,78 @@
     header { padding: 20px 20px 16px; }
     .scene-id { font-size: 22px; }
   }
+
+  /* ─── DENSITY SLIDER ─── */
+  .density-bar {
+    padding: 8px 20px 10px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .density-label {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+  .density-val {
+    font-size: 10px;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    width: 28px;
+    text-align: right;
+  }
+  input[type=range].density-slider {
+    flex: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 2px;
+    background: var(--border-bright);
+    outline: none;
+    border-radius: 0;
+  }
+  input[type=range].density-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 10px; height: 10px;
+    background: var(--accent);
+    border-radius: 0;
+    cursor: pointer;
+  }
+  input[type=range].density-slider::-moz-range-thumb {
+    width: 10px; height: 10px;
+    background: var(--accent);
+    border: none;
+    border-radius: 0;
+    cursor: pointer;
+  }
+
+  /* ─── ZOOM BUTTONS ─── */
+  .zoom-btns { display: flex; gap: 2px; }
+  .zoom-btn {
+    width: 26px; height: 26px;
+    background: transparent;
+    border: 1px solid var(--border-bright);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .zoom-btn:hover { border-color: var(--text); color: var(--text); }
+
+  /* ─── MOBILE ─── */
+  @media (max-width: 768px) {
+    .viewer-controls { flex-wrap: wrap; gap: 6px; }
+    .density-bar { padding: 8px 16px 10px; }
+    .export-bar { flex-wrap: wrap; gap: 6px; }
+    touch-action: none;
+  }
 </style>
 </head>
 <body>
@@ -574,9 +646,22 @@
       <div class="controls-left">
         <button class="ctrl-btn active" id="btnPoints" onclick="setRenderMode('points')">Points</button>
         <button class="ctrl-btn" id="btnWire" onclick="setRenderMode('wire')">Wire</button>
+        <button class="ctrl-btn active" id="btnAxes" onclick="setViewMode('axes')">Axes</button>
+        <button class="ctrl-btn" id="btnStill" onclick="setViewMode('still')">Still</button>
         <button class="ctrl-btn" onclick="resetCamera()">Reset</button>
       </div>
-      <div class="point-count" id="pointCount">—</div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div class="zoom-btns">
+          <button class="zoom-btn" onclick="zoomStep(-1)" title="Zoom in">+</button>
+          <button class="zoom-btn" onclick="zoomStep(1)" title="Zoom out">−</button>
+        </div>
+        <div class="point-count" id="pointCount">—</div>
+      </div>
+    </div>
+    <div class="density-bar">
+      <span class="density-label">Density</span>
+      <input type="range" class="density-slider" id="densitySlider" min="0.01" max="1" step="0.01" value="1" oninput="setDensity(this.value)">
+      <span class="density-val" id="densityVal">1.0x</span>
     </div>
 
     <div class="export-bar">
@@ -811,10 +896,7 @@ function setupOrbit(canvas) {
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 }
 
-function animate() {
-  requestAnimationFrame(animate);
-  if (renderer3D && scene3D && camera3D) renderer3D.render(scene3D, camera3D);
-}
+// animate() is defined below with auto-rotate support
 
 // ─── PLY PARSER ──────────────────────────────────────────────────────────────
 // Handles both ASCII and binary PLY files from SHARP
@@ -848,6 +930,13 @@ function renderPLYToScene(buffer) {
     geometry.boundingBox.getSize(size);
     const maxDim = Math.max(size.x, size.y, size.z);
     const scale = 2.5 / maxDim;
+
+    // Store full arrays for density slider
+    fullPositions = positions.slice();
+    fullColors = colors.slice();
+    // Reset density slider
+    const ds = document.getElementById('densitySlider');
+    if (ds) { ds.value = 1; document.getElementById('densityVal').textContent = '1.0x'; }
 
     pointCloud = new THREE.Points(geometry, new THREE.PointsMaterial({
       size: Math.min(0.015, 3 / Math.sqrt(N)),
@@ -1137,6 +1226,142 @@ window.addEventListener('resize', () => {
   camera3D.aspect = W / Math.max(H, 280);
   camera3D.updateProjectionMatrix();
 });
+
+// ─── VIEW MODE (AXES / STILL) ────────────────────────────────────────────────
+let viewMode = 'axes'; // axes = auto-rotate, still = locked
+let autoRotateSpeed = 0.003;
+
+function setViewMode(mode) {
+  viewMode = mode;
+  document.getElementById('btnAxes').classList.toggle('active', mode === 'axes');
+  document.getElementById('btnStill').classList.toggle('active', mode === 'still');
+}
+
+// Hook into animate loop for auto-rotate
+const _origAnimate = animate;
+function animate() {
+  requestAnimationFrame(animate);
+  applyWASD();
+  if (viewMode === 'axes' && pointCloud && !orbitState.active) {
+    pointCloud.rotation.y += autoRotateSpeed;
+    rotY = pointCloud.rotation.y;
+  }
+  if (renderer3D && scene3D && camera3D) renderer3D.render(scene3D, camera3D);
+}
+
+
+// ─── ZOOM BUTTONS + KEYBOARD ─────────────────────────────────────────────────
+function zoomStep(dir) {
+  zoom = Math.max(0.1, Math.min(30, zoom + dir * 0.4));
+  if (camera3D) camera3D.position.z = zoom;
+  document.getElementById('camInfo').textContent =
+    `rot ${(rotY * 57.3).toFixed(1)}° ${(rotX * 57.3).toFixed(1)}° · z ${zoom.toFixed(2)}`;
+}
+
+// ─── WASD + ARROW KEY MOVEMENT ───────────────────────────────────────────────
+const keysHeld = {};
+window.addEventListener('keydown', e => {
+  keysHeld[e.key.toLowerCase()] = true;
+  if (e.key === '+' || e.key === '=') zoomStep(-1);
+  if (e.key === '-' || e.key === '_') zoomStep(1);
+  // Prevent page scroll on arrow/space keys when canvas is focused
+  if (['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) {
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => { keysHeld[e.key.toLowerCase()] = false; });
+
+// Called every frame from animate()
+function applyWASD() {
+  if (!pointCloud) return;
+  const speed = 0.012;
+  if (keysHeld['w'] || keysHeld['arrowup'])    { panY += speed; pointCloud.position.y = panY; }
+  if (keysHeld['s'] || keysHeld['arrowdown'])  { panY -= speed; pointCloud.position.y = panY; }
+  if (keysHeld['a'] || keysHeld['arrowleft'])  { panX -= speed; pointCloud.position.x = panX; }
+  if (keysHeld['d'] || keysHeld['arrowright']) { panX += speed; pointCloud.position.x = panX; }
+  if (keysHeld['q']) { zoom = Math.max(0.1, zoom - speed * 3); if (camera3D) camera3D.position.z = zoom; }
+  if (keysHeld['e']) { zoom = Math.min(30,  zoom + speed * 3); if (camera3D) camera3D.position.z = zoom; }
+}
+
+// ─── MOBILE TOUCH (pinch-to-zoom + single-finger orbit) ──────────────────────
+let lastTouchDist = null;
+let lastTouchX = null, lastTouchY = null;
+
+document.getElementById('canvas3d').addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    lastTouchDist = Math.hypot(
+      e.touches[0].clientX - e.touches[1].clientX,
+      e.touches[0].clientY - e.touches[1].clientY
+    );
+  } else if (e.touches.length === 1) {
+    lastTouchX = e.touches[0].clientX;
+    lastTouchY = e.touches[0].clientY;
+  }
+}, { passive: false });
+
+document.getElementById('canvas3d').addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    const dist = Math.hypot(
+      e.touches[0].clientX - e.touches[1].clientX,
+      e.touches[0].clientY - e.touches[1].clientY
+    );
+    if (lastTouchDist) {
+      zoom = Math.max(0.1, Math.min(30, zoom - (dist - lastTouchDist) * 0.02));
+      if (camera3D) camera3D.position.z = zoom;
+    }
+    lastTouchDist = dist;
+  } else if (e.touches.length === 1 && lastTouchX !== null) {
+    const dx = e.touches[0].clientX - lastTouchX;
+    const dy = e.touches[0].clientY - lastTouchY;
+    rotY += dx * 0.008;
+    rotX += dy * 0.008;
+    if (pointCloud) { pointCloud.rotation.y = rotY; pointCloud.rotation.x = rotX; }
+    lastTouchX = e.touches[0].clientX;
+    lastTouchY = e.touches[0].clientY;
+  }
+}, { passive: false });
+
+document.getElementById('canvas3d').addEventListener('touchend', e => {
+  if (e.touches.length < 2) lastTouchDist = null;
+  if (e.touches.length === 0) { lastTouchX = null; lastTouchY = null; }
+}, { passive: false });
+
+// ─── DENSITY (subsample point cloud) ─────────────────────────────────────────
+let fullPositions = null, fullColors = null;
+
+function setDensity(val) {
+  const ratio = parseFloat(val);
+  document.getElementById('densityVal').textContent = ratio.toFixed(2) + 'x';
+  if (!pointCloud || !fullPositions) return;
+
+  const totalN = fullPositions.length / 3;
+  const keepN = Math.max(100, Math.floor(totalN * ratio));
+
+  if (keepN >= totalN) {
+    // Show all
+    pointCloud.geometry.setAttribute('position', new THREE.Float32BufferAttribute(fullPositions, 3));
+    pointCloud.geometry.setAttribute('color', new THREE.Float32BufferAttribute(fullColors, 3));
+  } else {
+    // Subsample evenly
+    const step = totalN / keepN;
+    const pos = new Float32Array(keepN * 3);
+    const col = new Float32Array(keepN * 3);
+    for (let i = 0; i < keepN; i++) {
+      const src = Math.floor(i * step);
+      pos[i*3] = fullPositions[src*3]; pos[i*3+1] = fullPositions[src*3+1]; pos[i*3+2] = fullPositions[src*3+2];
+      col[i*3] = fullColors[src*3]; col[i*3+1] = fullColors[src*3+1]; col[i*3+2] = fullColors[src*3+2];
+    }
+    pointCloud.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    pointCloud.geometry.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  }
+  pointCloud.geometry.attributes.position.needsUpdate = true;
+  pointCloud.geometry.attributes.color.needsUpdate = true;
+  document.getElementById('pointCount').innerHTML =
+    `<span>${(keepN/1000).toFixed(0)}k</span> gaussians`;
+}
+
 </script>
 </body>
 </html>
