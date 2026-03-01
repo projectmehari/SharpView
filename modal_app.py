@@ -4,8 +4,9 @@ Deploy:  modal deploy modal_app.py
 """
 
 import modal
-from fastapi import Request
+from fastapi import FastAPI, Request
 from fastapi.responses import Response, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 image = (
     modal.Image.from_registry(
@@ -20,37 +21,53 @@ image = (
         "wget -q -O /root/.cache/torch/hub/checkpoints/sharp_2572gikvuh.pt "
         "https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh.pt"
     )
-    .pip_install("pillow", "python-multipart", "fastapi")
+    .pip_install("pillow", "python-multipart", "fastapi", "starlette")
 )
 
 app = modal.App("sharpview", image=image)
 
 CHECKPOINT = "/root/.cache/torch/hub/checkpoints/sharp_2572gikvuh.pt"
 
-# Declare the FastAPI app at module level
-web_app = modal.asgi_app()
+# Modal Dict for shareable PLY storage (persists across containers)
+# Each entry: { "ply": <bytes>, "filename": str, "created": float }
+ply_store = modal.Dict.from_name("sharpview-ply-store", create_if_missing=True)
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+# Custom CORS: echoes back whatever origin the browser sends.
+class PermissiveCORS(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        origin = request.headers.get("origin") or "*"
+        if request.method == "OPTIONS":
+            return Response(
+                status_code=204,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                    "Access-Control-Max-Age": "86400",
+                },
+            )
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
 
 fastapi_app = FastAPI()
-fastapi_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+fastapi_app.add_middleware(PermissiveCORS)
+
 
 @fastapi_app.get("/health")
 def health():
     return {"status": "ok", "model": "apple/ml-sharp"}
 
+
 @fastapi_app.post("/predict")
 async def predict(request: Request):
-    import tempfile, subprocess, os, pathlib
+    import tempfile, subprocess, os, pathlib, uuid, time
 
     content_type = request.headers.get("content-type", "")
     ext = ".jpg"
+    filename = "input.jpg"
 
     try:
         if "multipart" in content_type:
@@ -60,6 +77,7 @@ async def predict(request: Request):
                 return JSONResponse({"error": "no image field"}, status_code=400)
             image_bytes = await image_file.read()
             fname = getattr(image_file, "filename", "input.jpg") or "input.jpg"
+            filename = fname
             ext = pathlib.Path(fname).suffix.lower() or ".jpg"
         else:
             image_bytes = await request.body()
@@ -75,6 +93,7 @@ async def predict(request: Request):
     if not image_bytes:
         return JSONResponse({"error": "empty body"}, status_code=400)
 
+    # Also capture depth map from SHARP output
     print(f"Image received: {len(image_bytes)} bytes, ext={ext}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -83,7 +102,8 @@ async def predict(request: Request):
         os.makedirs(input_dir)
         os.makedirs(output_dir)
 
-        with open(os.path.join(input_dir, f"image{ext}"), "wb") as f:
+        input_path = os.path.join(input_dir, f"image{ext}")
+        with open(input_path, "wb") as f:
             f.write(image_bytes)
 
         cmd = ["sharp", "predict", "-i", input_dir, "-o", output_dir, "-c", CHECKPOINT]
@@ -105,13 +125,82 @@ async def predict(request: Request):
             return JSONResponse({"error": "no PLY found", "files": all_files}, status_code=500)
 
         ply_bytes = ply_files[0].read_bytes()
-        print(f"✓ PLY: {len(ply_bytes)//1024}kb")
+        print(f"PLY: {len(ply_bytes)//1024}kb")
 
-        return Response(
-            content=ply_bytes,
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": 'attachment; filename="output.ply"'},
-        )
+        # Look for depth map (SHARP outputs depth as PNG/EXR alongside PLY)
+        depth_bytes = None
+        depth_b64 = None
+        for ext_try in ["*.png", "*.jpg", "*.exr"]:
+            depth_files = [f for f in pathlib.Path(output_dir).glob(f"**/{ext_try}")
+                          if "depth" in f.name.lower() or "disp" in f.name.lower()]
+            if depth_files:
+                depth_bytes = depth_files[0].read_bytes()
+                break
+
+        # If no labeled depth file, grab any PNG output that isn't the input
+        if not depth_bytes:
+            all_pngs = [f for f in pathlib.Path(output_dir).glob("**/*.png")]
+            if all_pngs:
+                depth_bytes = all_pngs[0].read_bytes()
+
+        if depth_bytes:
+            import base64
+            depth_b64 = base64.b64encode(depth_bytes).decode()
+
+        # Store in Modal Dict for shareable links (TTL: 7 days via key prefix)
+        share_id = str(uuid.uuid4())[:8]
+        try:
+            ply_store[share_id] = {
+                "ply": ply_bytes,
+                "filename": pathlib.Path(filename).stem,
+                "created": time.time(),
+            }
+            print(f"Stored share_id={share_id}")
+        except Exception as e:
+            print(f"Share store error (non-fatal): {e}")
+            share_id = None
+
+        # Return multipart response: ply + depth + share_id as JSON envelope
+        import json
+        response_data = {
+            "share_id": share_id,
+            "ply_b64": __import__('base64').b64encode(ply_bytes).decode(),
+            "depth_b64": depth_b64,
+            "ply_size": len(ply_bytes),
+        }
+
+        return JSONResponse(response_data)
+
+
+@fastapi_app.get("/share/{share_id}")
+async def get_share(share_id: str):
+    """Return the PLY file for a given share ID."""
+    try:
+        entry = ply_store[share_id]
+    except KeyError:
+        return JSONResponse({"error": "share not found or expired"}, status_code=404)
+
+    return Response(
+        content=entry["ply"],
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{entry["filename"]}.ply"'},
+    )
+
+
+@fastapi_app.get("/share/{share_id}/info")
+async def get_share_info(share_id: str):
+    """Return metadata for a share link."""
+    import time
+    try:
+        entry = ply_store[share_id]
+    except KeyError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {
+        "share_id": share_id,
+        "filename": entry.get("filename"),
+        "created": entry.get("created"),
+        "ply_size": len(entry["ply"]),
+    }
 
 
 @app.function(

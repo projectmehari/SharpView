@@ -6,20 +6,195 @@
 <title>SharpView · Monocular 3DGS</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js">
+// ─── DEPTH MAP ────────────────────────────────────────────────────────────────
+function showDepthMap(b64) {
+  const panel = document.getElementById('depthPanel');
+  const img = document.getElementById('depthImg');
+  const status = document.getElementById('depthStatus');
+  img.src = 'data:image/png;base64,' + b64;
+  panel.classList.add('visible');
+  status.textContent = 'received';
+}
+
+// ─── DEPTH FOG (ambient occlusion simulation) ─────────────────────────────────
+function applyDepthFog(cloud) {
+  if (!cloud || !scene3D) return;
+  // Modify point material to fade distant points via fog
+  scene3D.fog = new THREE.FogExp2(0xeae6de, 0.18);
+  if (cloud.material) {
+    cloud.material.fog = true;
+    cloud.material.needsUpdate = true;
+  }
+}
+
+function removeDepthFog() {
+  if (scene3D) scene3D.fog = null;
+  if (pointCloud && pointCloud.material) {
+    pointCloud.material.fog = false;
+    pointCloud.material.needsUpdate = true;
+  }
+}
+
+let fogEnabled = false;
+function toggleFog() {
+  fogEnabled = !fogEnabled;
+  if (fogEnabled) applyDepthFog(pointCloud);
+  else removeDepthFog();
+  const btn = document.getElementById('btnFog');
+  if (btn) btn.classList.toggle('active', fogEnabled);
+}
+
+// ─── SCREENSHOT ───────────────────────────────────────────────────────────────
+function takeScreenshot() {
+  if (!renderer3D) return;
+  // Force a render with preserveDrawingBuffer
+  renderer3D.render(scene3D, camera3D);
+  const dataURL = renderer3D.domElement.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = dataURL;
+  const name = document.getElementById('fnVal').textContent || 'sharpview';
+  a.download = `sharpview_${name.replace(/\.\w+$/, '')}.png`;
+  a.click();
+  addLog('ok', 'screenshot saved · PNG');
+}
+
+// ─── SHARE LINK ───────────────────────────────────────────────────────────────
+function shareLink() {
+  if (!currentShareId) return;
+
+  // Check URL params — if we're on Vercel, use the vercel domain
+  const origin = window.location.origin.includes('localhost') || window.location.origin.startsWith('file')
+    ? 'https://ml-sharp.vercel.app'
+    : window.location.origin;
+
+  const shareUrl = `${origin}?share=${currentShareId}`;
+
+  document.getElementById('shareLinkInput').value = shareUrl;
+  document.getElementById('shareToast').classList.add('visible');
+  addLog('ok', `share link ready · id ${currentShareId}`);
+}
+
+function copyShareLink() {
+  const input = document.getElementById('shareLinkInput');
+  navigator.clipboard.writeText(input.value).then(() => {
+    const btn = document.querySelector('.share-toast-copy');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1800);
+  });
+}
+
+function closeShareToast() {
+  document.getElementById('shareToast').classList.remove('visible');
+}
+
+// ─── LOAD FROM SHARE ID ───────────────────────────────────────────────────────
+async function loadFromShareId(shareId) {
+  addLog('info', `loading shared splat · ${shareId}…`);
+  setStatusBadge('complete', 'Loading…');
+  setProgress('indeterminate');
+  try {
+    const resp = await fetch(`${MODAL_BASE}/share/${shareId}`);
+    if (!resp.ok) throw new Error('Share not found or expired');
+    const buf = await resp.arrayBuffer();
+    generatedPLYBuffer = buf;
+    currentShareId = shareId;
+    renderPLYToScene(buf);
+    enableExports();
+    document.getElementById('screenshotBtn').disabled = false;
+    document.getElementById('shareBtn').disabled = false;
+    setProgress('complete');
+    addLog('ok', `loaded shared splat · ${shareId}`);
+    setStatusBadge('complete', 'Loaded');
+  } catch (e) {
+    addLog('err', e.message);
+    setStatusBadge('complete', 'Error');
+    setProgress('reset');
+  }
+}
+
+// ─── AUTO-LOAD SHARE PARAM ────────────────────────────────────────────────────
+(function checkShareParam() {
+  const params = new URLSearchParams(window.location.search);
+  const shareId = params.get('share');
+  if (shareId) {
+    // wait for page to be ready
+    setTimeout(() => loadFromShareId(shareId), 400);
+  }
+})();
+
+// ─── MINIMAP ─────────────────────────────────────────────────────────────────
+let minimapRenderer = null, minimapCamera = null, minimapScene = null;
+
+function initMinimap() {
+  const canvas = document.getElementById('minimapCanvas');
+  if (!canvas || minimapRenderer) return;
+
+  minimapRenderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true });
+  minimapRenderer.setSize(80, 80);
+  minimapRenderer.setClearColor(0xeae6de, 0.0);
+
+  minimapCamera = new THREE.OrthographicCamera(-2, 2, 2, -2, 0.01, 100);
+  minimapCamera.position.set(0, 8, 0); // top-down
+  minimapCamera.lookAt(0, 0, 0);
+
+  minimapScene = new THREE.Scene();
+  document.getElementById('minimapWrap').style.display = 'block';
+}
+
+function updateMinimap() {
+  if (!minimapRenderer || !minimapScene || !minimapCamera) return;
+
+  // Sync minimap scene with main scene objects
+  while (minimapScene.children.length) minimapScene.remove(minimapScene.children[0]);
+
+  if (pointCloud) {
+    // Clone point cloud into minimap with smaller points
+    const miniGeo = pointCloud.geometry.clone();
+    const miniMat = new THREE.PointsMaterial({
+      size: 0.04,
+      vertexColors: true,
+      sizeAttenuation: true,
+    });
+    const miniCloud = new THREE.Points(miniGeo, miniMat);
+    miniCloud.rotation.copy(pointCloud.rotation);
+    miniCloud.position.copy(pointCloud.position);
+    miniCloud.scale.copy(pointCloud.scale);
+    minimapScene.add(miniCloud);
+  }
+
+  // Camera frustum indicator
+  if (camera3D) {
+    const geo = new THREE.ConeGeometry(0.15, 0.4, 4);
+    const mat = new THREE.MeshBasicMaterial({ color: 0xb8864a, wireframe: true });
+    const cone = new THREE.Mesh(geo, mat);
+    cone.position.set(panX, 0, zoom * 0.3);
+    cone.rotation.x = Math.PI / 2;
+    minimapScene.add(cone);
+  }
+
+  minimapRenderer.render(minimapScene, minimapCamera);
+}
+
+</script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg: #080808;
-    --surface: #0f0f0f;
-    --border: #1e1e1e;
-    --border-bright: #2e2e2e;
-    --text: #e8e5de;
-    --muted: #5a5750;
-    --accent: #c8f564;
-    --accent-dim: #7a9840;
-    --danger: #f56464;
+    --bg: #eae6de;
+    --surface: rgba(26,24,20,0.04);
+    --glass: rgba(255,255,255,0.50);
+    --glass-border: rgba(120,100,70,0.18);
+    --glass-bright: rgba(120,100,70,0.32);
+    --border: rgba(120,100,70,0.14);
+    --border-bright: rgba(120,100,70,0.25);
+    --text: #1a1814;
+    --muted: #8a8070;
+    --accent: #b8864a;
+    --accent-dim: #8a6030;
+    --accent-warm: #d4a870;
+    --blue: #6a8a7a;
+    --danger: #c04040;
     --mono: 'IBM Plex Mono', monospace;
     --serif: 'Instrument Serif', serif;
   }
@@ -28,31 +203,81 @@
     background: var(--bg);
     color: var(--text);
     font-family: var(--mono);
-    font-size: 13px;
+    font-size: 12px;
     line-height: 1.6;
     min-height: 100vh;
     overflow-x: hidden;
   }
 
+  /* Deep glossy background — layered gradients like frosted glass behind dark matter */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 70% 50% at 15% 0%, rgba(180,140,80,0.12) 0%, transparent 55%),
+      radial-gradient(ellipse 50% 40% at 85% 90%, rgba(150,120,70,0.10) 0%, transparent 50%),
+      radial-gradient(ellipse 100% 80% at 50% 50%, rgba(220,210,190,0.0) 0%, transparent 100%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Film grain overlay */
   body::before {
     content: '';
     position: fixed;
     inset: 0;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
     pointer-events: none;
     z-index: 9999;
-    opacity: 0.4;
+    opacity: 0.55;
+    mix-blend-mode: overlay;
   }
+
+  body > * { position: relative; z-index: 1; }
 
   header {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    padding: 28px 32px 20px;
+    padding: 14px 24px 12px;
     border-bottom: 1px solid var(--border);
+    background: rgba(234,230,222,0.85);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
   }
 
-  .header-left { display: flex; flex-direction: column; gap: 4px; }
+  .header-badges {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-radius: 2px;
+    border: 1px solid var(--glass-border);
+    background: rgba(255,252,248,0.80);
+    backdrop-filter: blur(10px);
+    color: var(--muted);
+  }
+  .badge.complete { border-color: rgba(184,134,74,0.35); background: rgba(184,134,74,0.10); color: var(--accent); }
+  .badge.online { border-color: rgba(106,138,122,0.30); background: rgba(106,138,122,0.08); color: var(--blue); }
+  .badge.docs { border-color: var(--glass-border); color: var(--muted); cursor: pointer; transition: all 0.15s; }
+  .badge.docs:hover { border-color: var(--glass-bright); color: var(--text); }
+  .badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .badge.docs::before { display: none; }
+
+  .header-left { display: flex; flex-direction: column; gap: 2px; }
 
   .nav-back {
     font-size: 11px;
@@ -73,11 +298,12 @@
 
   .scene-id {
     font-family: var(--serif);
-    font-size: 28px;
+    font-size: 22px;
     font-style: italic;
     color: var(--text);
     line-height: 1;
     margin-top: 2px;
+    letter-spacing: -0.01em;
   }
 
   .header-right {
@@ -106,30 +332,35 @@
 
   .main {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    height: calc(100vh - 97px);
+    grid-template-columns: 340px 1fr;
+    height: calc(100vh - 69px);
     min-height: 600px;
   }
 
   .panel {
-    border-right: 1px solid var(--border);
+    border-right: 1px solid var(--glass-border);
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    background: rgba(255,252,248,0.60);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    box-shadow: 1px 0 0 rgba(120,100,70,0.12);
   }
-  .panel:last-child { border-right: none; }
+  .panel:last-child { border-right: none; background: rgba(234,230,222,0.25); }
 
   .panel-header {
-    padding: 14px 24px;
-    border-bottom: 1px solid var(--border);
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--glass-border);
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 11px;
-    letter-spacing: 0.1em;
+    font-size: 10px;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--muted);
     flex-shrink: 0;
+    background: rgba(255,252,248,0.40);
   }
 
   .upload-zone {
@@ -138,48 +369,51 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    margin: 24px;
-    border: 1px dashed var(--border-bright);
-    border-radius: 2px;
+    margin: 10px;
+    border: 1px dashed var(--glass-border);
+    border-radius: 4px;
     cursor: pointer;
-    transition: border-color 0.2s, background 0.2s;
+    transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
     position: relative;
     overflow: hidden;
-    min-height: 180px;
+    min-height: 100px;
+    background: rgba(255,252,248,0.50);
   }
 
   .upload-zone:hover, .upload-zone.drag-over {
-    border-color: var(--accent-dim);
-    background: rgba(200, 245, 100, 0.03);
+    border-color: rgba(184,134,74,0.50);
+    background: rgba(184,134,74,0.04);
+    box-shadow: none;
   }
 
   .upload-zone.has-image {
     border-style: solid;
-    border-color: var(--border-bright);
+    border-color: var(--glass-bright);
+    background: transparent;
   }
 
   .upload-prompt {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 12px;
-    padding: 32px;
+    gap: 8px;
+    padding: 16px;
     text-align: center;
   }
 
   .upload-icon {
-    width: 44px; height: 44px;
+    width: 32px; height: 32px;
     border: 1px solid var(--border-bright);
     border-radius: 2px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 18px;
+    font-size: 14px;
     color: var(--muted);
   }
 
-  .upload-label { font-size: 13px; color: var(--text); }
-  .upload-sublabel { font-size: 11px; color: var(--muted); line-height: 1.8; }
+  .upload-label { font-size: 11px; color: var(--text); }
+  .upload-sublabel { font-size: 10px; color: var(--muted); line-height: 1.5; }
   .upload-hint {
     margin-top: 4px;
     font-size: 10px;
@@ -199,10 +433,10 @@
   }
 
   .input-meta {
-    padding: 0 24px 12px;
+    padding: 0 14px 6px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 3px;
     flex-shrink: 0;
   }
 
@@ -210,17 +444,17 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 11px;
+    font-size: 10px;
   }
   .meta-key { color: var(--muted); }
   .meta-val { color: var(--text); font-weight: 500; }
 
-  .divider { height: 1px; background: var(--border); margin: 0 24px; flex-shrink: 0; }
+  .divider { height: 1px; background: var(--glass-border); margin: 0 14px; flex-shrink: 0; }
 
   .log-panel {
-    padding: 8px 24px;
+    padding: 4px 14px;
     flex-shrink: 0;
-    height: 64px;
+    height: 46px;
     overflow-y: auto;
   }
 
@@ -231,24 +465,24 @@
     display: flex;
     gap: 12px;
   }
-  .log-ts { color: var(--border-bright); flex-shrink: 0; }
-  .log-ok { color: var(--accent); }
+  .log-ts { color: var(--muted); flex-shrink: 0; opacity: 0.6; }
+  .log-ok { color: var(--accent-dim); }
   .log-err { color: var(--danger); }
   .log-info { color: var(--muted); }
 
   .run-section {
-    padding: 12px 24px 16px;
+    padding: 8px 14px 10px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
     flex-shrink: 0;
   }
 
   .btn-run {
     width: 100%;
-    padding: 13px 24px;
-    background: var(--accent);
-    color: #0a0a0a;
+    padding: 10px 24px;
+    background: var(--text);
+    color: var(--bg);
     border: none;
     font-family: var(--mono);
     font-size: 12px;
@@ -256,12 +490,14 @@
     letter-spacing: 0.12em;
     text-transform: uppercase;
     cursor: pointer;
-    transition: background 0.15s, transform 0.1s;
+    transition: background 0.15s, transform 0.1s, box-shadow 0.2s;
+    border-radius: 2px;
+    box-shadow: none;
   }
 
-  .btn-run:hover:not(:disabled) { background: #d9ff70; transform: translateY(-1px); }
-  .btn-run:disabled { background: var(--border-bright); color: var(--muted); cursor: not-allowed; }
-  .btn-run.loading { background: var(--accent-dim); color: var(--bg); animation: shimmer 1.5s infinite; }
+  .btn-run:hover:not(:disabled) { background: #2a2420; transform: translateY(-1px); box-shadow: none; }
+  .btn-run:disabled { background: rgba(26,24,20,0.08); color: var(--muted); cursor: not-allowed; box-shadow: none; }
+  .btn-run.loading { background: var(--accent); color: var(--bg); animation: shimmer 1.5s infinite; }
 
   @keyframes shimmer { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 
@@ -278,30 +514,55 @@
 
   /* ─── MODAL CONFIG BANNER ─── */
   .modal-banner {
-    margin: 0 24px 12px;
-    padding: 10px 14px;
-    border: 1px solid var(--border-bright);
-    background: rgba(200, 245, 100, 0.04);
+    margin: 0 16px 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--glass-border);
+    background: var(--glass);
+    backdrop-filter: blur(10px);
     font-size: 10px;
     color: var(--muted);
-    display: flex;
+    display: none;
     align-items: center;
     gap: 10px;
     flex-shrink: 0;
+    border-radius: 3px;
   }
+  .modal-banner.visible { display: flex; }
   .modal-banner input {
     flex: 1;
     background: transparent;
     border: none;
-    border-bottom: 1px solid var(--border-bright);
+    border-bottom: 1px solid var(--glass-border);
     color: var(--text);
     font-family: var(--mono);
     font-size: 10px;
     padding: 2px 4px;
     outline: none;
   }
-  .modal-banner input:focus { border-bottom-color: var(--accent-dim); }
+  .modal-banner input:focus { border-bottom-color: var(--accent); }
   .modal-banner input::placeholder { color: var(--muted); }
+
+  /* Info toggle row */
+  .info-toggle-row {
+    padding: 6px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .toggle-btn {
+    font-size: 10px;
+    color: var(--muted);
+    background: rgba(255,252,248,0.60);
+    border: 1px solid var(--glass-border);
+    font-family: var(--mono);
+    padding: 2px 8px;
+    cursor: pointer;
+    letter-spacing: 0.06em;
+    transition: all 0.15s;
+    border-radius: 2px;
+  }
+  .toggle-btn:hover { color: var(--text); border-color: var(--glass-bright); }
 
   /* ─── VIEWER ─── */
   .viewer-panel { display: flex; flex-direction: column; }
@@ -311,7 +572,7 @@
     width: 100%;
     cursor: grab;
     display: none;
-    background: #050505;
+    background: transparent;
   }
   #canvas3d:active { cursor: grabbing; }
 
@@ -324,7 +585,7 @@
     gap: 16px;
     color: var(--muted);
     font-size: 11px;
-    background: #050505;
+    background: rgba(234,230,222,0.30);
     position: relative;
     overflow: hidden;
   }
@@ -334,10 +595,10 @@
     position: absolute;
     inset: 0;
     background-image:
-      linear-gradient(var(--border) 1px, transparent 1px),
-      linear-gradient(90deg, var(--border) 1px, transparent 1px);
-    background-size: 40px 40px;
-    opacity: 0.5;
+      linear-gradient(rgba(120,100,70,0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(120,100,70,0.08) 1px, transparent 1px);
+    background-size: 48px 48px;
+    opacity: 0.8;
   }
 
   .placeholder-inner {
@@ -360,7 +621,7 @@
     color: var(--border-bright);
   }
 
-  .progress-bar { height: 1px; background: var(--border); overflow: hidden; flex-shrink: 0; }
+  .progress-bar { height: 1px; background: rgba(120,100,70,0.15); overflow: hidden; flex-shrink: 0; }
   .progress-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.4s ease; }
   .progress-bar.indeterminate .progress-fill {
     width: 30%;
@@ -369,20 +630,22 @@
   @keyframes progress-slide { 0% { transform: translateX(-200%); } 100% { transform: translateX(400%); } }
 
   .viewer-controls {
-    padding: 10px 20px;
-    border-top: 1px solid var(--border);
+    padding: 6px 12px;
+    border-top: 1px solid var(--glass-border);
     display: flex;
     justify-content: space-between;
     align-items: center;
     flex-shrink: 0;
+    background: rgba(234,230,222,0.70);
+    backdrop-filter: blur(16px);
   }
 
   .controls-left { display: flex; gap: 6px; }
 
   .ctrl-btn {
     padding: 5px 11px;
-    background: transparent;
-    border: 1px solid var(--border-bright);
+    background: rgba(255,252,248,0.70);
+    border: 1px solid var(--glass-border);
     color: var(--muted);
     font-family: var(--mono);
     font-size: 10px;
@@ -390,20 +653,24 @@
     cursor: pointer;
     transition: all 0.15s;
     text-transform: uppercase;
+    backdrop-filter: blur(8px);
+    border-radius: 2px;
   }
-  .ctrl-btn:hover { border-color: var(--text); color: var(--text); }
+  .ctrl-btn:hover { border-color: var(--glass-bright); color: var(--text); background: var(--glass-border); }
   .ctrl-btn.active { background: var(--text); color: var(--bg); border-color: var(--text); }
 
   .point-count { font-size: 10px; color: var(--muted); letter-spacing: 0.06em; }
   .point-count span { color: var(--accent); }
 
   .export-bar {
-    padding: 10px 20px;
-    border-top: 1px solid var(--border);
+    padding: 6px 12px;
+    border-top: 1px solid var(--glass-border);
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex-shrink: 0;
+    background: rgba(234,230,222,0.70);
+    backdrop-filter: blur(16px);
   }
 
   .export-label {
@@ -417,9 +684,9 @@
 
   .export-btn {
     padding: 4px 11px;
-    background: transparent;
-    border: 1px solid var(--border-bright);
-    color: var(--muted);
+    background: rgba(26,24,20,0.07);
+    border: 1px solid rgba(120,100,70,0.30);
+    color: var(--text);
     font-family: var(--mono);
     font-size: 10px;
     letter-spacing: 0.08em;
@@ -427,22 +694,25 @@
     transition: all 0.15s;
     text-transform: uppercase;
     flex-shrink: 0;
+    backdrop-filter: blur(8px);
+    border-radius: 2px;
   }
-  .export-btn:hover:not(:disabled) { border-color: var(--accent-dim); color: var(--accent); }
-  .export-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-  .export-btn.supersplat:hover:not(:disabled) { border-color: #64b5f6; color: #64b5f6; }
+  .export-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: rgba(184,134,74,0.10); }
+  .export-btn:disabled { opacity: 0.35; cursor: not-allowed; border-color: rgba(120,100,70,0.20); color: var(--muted); }
+  .export-btn.supersplat:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); background: rgba(106,138,122,0.10); }
 
   .export-spacer { flex: 1; }
 
   .coord-strip {
-    padding: 8px 24px;
+    padding: 5px 14px;
     font-size: 10px;
     color: var(--muted);
-    letter-spacing: 0.06em;
-    border-top: 1px solid var(--border);
+    letter-spacing: 0.10em;
+    border-top: 1px solid var(--glass-border);
     display: flex;
     justify-content: space-between;
     flex-shrink: 0;
+    background: rgba(234,230,222,0.80);
   }
 
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -451,14 +721,17 @@
   @media (max-width: 768px) {
     .main { grid-template-columns: 1fr; height: auto; }
     .panel { min-height: 480px; }
-    header { padding: 20px 20px 16px; }
+    header { padding: 16px 20px; }
     .scene-id { font-size: 22px; }
+    .header-badges { display: none; }
   }
 
   /* ─── DENSITY SLIDER ─── */
   .density-bar {
-    padding: 8px 20px 10px;
-    border-top: 1px solid var(--border);
+    padding: 5px 12px 6px;
+    border-top: 1px solid var(--glass-border);
+    background: rgba(234,230,222,0.70);
+    backdrop-filter: blur(16px);
     display: flex;
     align-items: center;
     gap: 10px;
@@ -507,7 +780,7 @@
   .zoom-btns { display: flex; gap: 2px; }
   .zoom-btn {
     width: 26px; height: 26px;
-    background: transparent;
+    background: rgba(255,252,248,0.70);
     border: 1px solid var(--border-bright);
     color: var(--muted);
     font-family: var(--mono);
@@ -526,6 +799,159 @@
     .export-bar { flex-wrap: wrap; gap: 6px; }
     touch-action: none;
   }
+
+  /* ─── DEPTH MAP PREVIEW ─── */
+  .depth-panel {
+    display: none;
+    flex-direction: column;
+    border-top: 1px solid var(--glass-border);
+    flex-shrink: 0;
+  }
+  .depth-panel.visible { display: flex; }
+  .depth-header {
+    padding: 5px 14px;
+    font-size: 10px;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-bottom: 1px solid var(--glass-border);
+    background: rgba(255,252,248,0.40);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .depth-img-wrap {
+    height: 110px;
+    overflow: hidden;
+    position: relative;
+    background: rgba(26,24,20,0.06);
+  }
+  .depth-img-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    filter: grayscale(0.3) contrast(1.1);
+  }
+  .depth-badge {
+    position: absolute;
+    bottom: 6px; right: 6px;
+    font-size: 9px;
+    padding: 2px 6px;
+    background: rgba(26,24,20,0.7);
+    color: rgba(234,230,222,0.8);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  /* ─── MINIMAP ─── */
+  .minimap-wrap {
+    position: absolute;
+    bottom: 130px;
+    right: 12px;
+    width: 80px;
+    height: 80px;
+    z-index: 10;
+    border: 1px solid var(--glass-border);
+    background: rgba(255,252,248,0.55);
+    backdrop-filter: blur(10px);
+    overflow: hidden;
+    pointer-events: none;
+  }
+  #minimapCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .minimap-label {
+    position: absolute;
+    top: 3px; left: 4px;
+    font-size: 8px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    pointer-events: none;
+  }
+
+  /* ─── SCREENSHOT + SHARE BUTTONS ─── */
+  .viewer-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .action-btn {
+    padding: 4px 10px;
+    background: rgba(26,24,20,0.07);
+    border: 1px solid rgba(120,100,70,0.30);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-transform: uppercase;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .action-btn:disabled { opacity: 0.30; cursor: not-allowed; }
+  .action-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: rgba(184,134,74,0.08); }
+  .action-btn.share-btn:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); background: rgba(106,138,122,0.08); }
+
+  /* ─── SHARE TOAST ─── */
+  .share-toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--text);
+    color: var(--bg);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    opacity: 0;
+    transition: opacity 0.25s, transform 0.25s;
+    z-index: 9999;
+    white-space: nowrap;
+    max-width: 90vw;
+  }
+  .share-toast.visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+  .share-toast input {
+    background: rgba(255,255,255,0.15);
+    border: none;
+    border-bottom: 1px solid rgba(255,255,255,0.3);
+    color: inherit;
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 2px 4px;
+    width: 220px;
+    outline: none;
+  }
+  .share-toast-close {
+    cursor: pointer;
+    opacity: 0.6;
+    font-size: 14px;
+    padding: 0 4px;
+    background: none;
+    border: none;
+    color: inherit;
+  }
+  .share-toast-copy {
+    cursor: pointer;
+    font-size: 10px;
+    padding: 2px 8px;
+    background: rgba(255,255,255,0.2);
+    border: none;
+    color: inherit;
+    font-family: var(--mono);
+    letter-spacing: 0.06em;
+  }
+  .share-toast-copy:hover { background: rgba(255,255,255,0.3); }
 </style>
 </head>
 <body>
@@ -537,10 +963,12 @@
     <div class="scene-id">SharpView</div>
   </div>
   <div class="header-right">
-    <div class="status-live">live</div>
-    <div>Apple ML · SHARP · Modal GPU</div>
-    <div>Single Image → 3DGS · &lt;1s inference</div>
-    <div style="margin-top:4px">45.5017° N, 73.5673° W</div>
+    <div class="header-badges">
+      <span class="badge complete" id="statusBadge">Idle</span>
+      <span class="badge docs" onclick="window.open('https://github.com/projectmehari/ml-sharp','_blank')">GitHub</span>
+      <span class="badge online">Online</span>
+    </div>
+    <div style="font-size:11px;color:var(--muted)">45.5017° N, 73.5673° W</div>
   </div>
 </header>
 
@@ -548,16 +976,8 @@
 
   <!-- ─── LEFT: INPUT ─── -->
   <div class="panel">
-    <div class="panel-header">
-      <span>Input · Source Image</span>
-      <span>MODAL · A10G GPU</span>
-    </div>
-
-    <!-- Modal URL config -->
-    <div class="modal-banner">
-      <span style="flex-shrink:0">endpoint</span>
-      <input type="text" id="modalUrl" value="https://projectmehari--sharpview-serve.modal.run/predict" />
-    </div>
+    <!-- endpoint hidden in JS only -->
+    <input type="text" id="modalUrl" value="https://projectmehari--sharpview-serve.modal.run/predict" style="display:none">
 
     <div class="upload-zone" id="uploadZone">
       <div class="upload-prompt" id="uploadPrompt">
@@ -582,10 +1002,6 @@
         <span class="meta-val">SHARP · apple/ml-sharp</span>
       </div>
       <div class="meta-row">
-        <span class="meta-key">backend</span>
-        <span class="meta-val">Modal · A10G · $30/mo free</span>
-      </div>
-      <div class="meta-row">
         <span class="meta-key">resolution</span>
         <span class="meta-val" id="resVal">—</span>
       </div>
@@ -601,6 +1017,18 @@
 
     <div class="divider"></div>
 
+    <!-- Depth map preview -->
+    <div class="depth-panel" id="depthPanel">
+      <div class="depth-header">
+        <span>Depth Map · SHARP Output</span>
+        <span id="depthStatus" style="color:var(--muted)">—</span>
+      </div>
+      <div class="depth-img-wrap">
+        <img id="depthImg" src="" alt="depth map">
+        <span class="depth-badge">Monocular Depth</span>
+      </div>
+    </div>
+
     <div class="log-panel" id="logPanel"></div>
 
     <div class="run-section">
@@ -609,7 +1037,7 @@
         <span class="timer" id="timer">0.00s</span>
       </div>
       <button class="btn-run" id="runBtn" disabled>
-        Run SHARP Inference →
+        Generate Splat →
       </button>
     </div>
 
@@ -632,6 +1060,12 @@
 
     <canvas id="canvas3d"></canvas>
 
+    <!-- Minimap overlay -->
+    <div class="minimap-wrap" id="minimapWrap" style="display:none">
+      <span class="minimap-label">Top</span>
+      <canvas id="minimapCanvas" width="80" height="80"></canvas>
+    </div>
+
     <div class="canvas-placeholder" id="placeholder">
       <div class="placeholder-inner">
         <div class="placeholder-icon">⬡</div>
@@ -648,9 +1082,14 @@
         <button class="ctrl-btn" id="btnWire" onclick="setRenderMode('wire')">Wire</button>
         <button class="ctrl-btn active" id="btnAxes" onclick="setViewMode('axes')">Axes</button>
         <button class="ctrl-btn" id="btnStill" onclick="setViewMode('still')">Still</button>
+        <button class="ctrl-btn" id="btnFog" onclick="toggleFog()">Fog</button>
         <button class="ctrl-btn" onclick="resetCamera()">Reset</button>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
+        <div class="viewer-actions">
+          <button class="action-btn" id="screenshotBtn" disabled onclick="takeScreenshot()" title="Save PNG">⬇ PNG</button>
+          <button class="action-btn share-btn" id="shareBtn" disabled onclick="shareLink()" title="Share link">↗ Share</button>
+        </div>
         <div class="zoom-btns">
           <button class="zoom-btn" onclick="zoomStep(-1)" title="Zoom in">+</button>
           <button class="zoom-btn" onclick="zoomStep(1)" title="Zoom out">−</button>
@@ -690,6 +1129,17 @@ let rotX = 0, rotY = 0, panX = 0, panY = 0, zoom = 3;
 let renderMode = 'points';
 let timerInterval = null;
 let generatedPLYBuffer = null;
+let currentShareId = null;
+const MODAL_BASE = 'https://projectmehari--sharpview-serve.modal.run';
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function base64ToArrayBuffer(b64) {
+  const bin = atob(b64);
+  const buf = new ArrayBuffer(bin.length);
+  const arr = new Uint8Array(buf);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return buf;
+}
 
 // ─── UPLOAD ───────────────────────────────────────────────────────────────────
 const uploadZone = document.getElementById('uploadZone');
@@ -784,8 +1234,9 @@ async function runInference() {
   const btn = document.getElementById('runBtn');
   btn.disabled = true;
   btn.classList.add('loading');
-  btn.textContent = 'Running on Modal GPU…';
+  btn.textContent = 'Generating…';
   document.getElementById('statusLabel').textContent = 'processing';
+  setStatusBadge('complete', 'Running…');
   setProgress('indeterminate');
   startTimer();
   addLog('info', 'sending to Modal · A10G GPU…');
@@ -805,16 +1256,32 @@ async function runInference() {
     }
 
     const elapsed = stopTimer();
-    const plyBuffer = await resp.arrayBuffer();
+    const json = await resp.json();
+
+    // Decode PLY from base64
+    const plyBuffer = base64ToArrayBuffer(json.ply_b64);
     generatedPLYBuffer = plyBuffer;
+
+    // Store share ID
+    currentShareId = json.share_id || null;
 
     const kb = (plyBuffer.byteLength / 1024).toFixed(0);
     document.getElementById('plySize').textContent = `${kb}kb`;
 
     addLog('ok', `inference complete · ${elapsed}s · ${kb}kb PLY`);
+    setStatusBadge('complete', `Complete ${elapsed}s`);
     setProgress('complete');
     renderPLYToScene(plyBuffer);
     enableExports();
+
+    // Show depth map if available
+    if (json.depth_b64) {
+      showDepthMap(json.depth_b64);
+    }
+
+    // Enable screenshot + share
+    document.getElementById('screenshotBtn').disabled = false;
+    if (currentShareId) document.getElementById('shareBtn').disabled = false;
 
     document.getElementById('statusLabel').textContent = 'complete';
 
@@ -823,6 +1290,7 @@ async function runInference() {
     addLog('err', err.message);
     setProgress('reset');
     document.getElementById('statusLabel').textContent = 'error';
+    setStatusBadge('complete', 'Error');
     // Fallback demo
     addLog('info', 'showing demo cloud…');
     generateDemoCloud();
@@ -831,7 +1299,7 @@ async function runInference() {
 
   btn.classList.remove('loading');
   btn.disabled = false;
-  btn.textContent = 'Re-run Inference →';
+  btn.textContent = 'Generate Splat →';
 }
 
 // ─── THREE.JS INIT ────────────────────────────────────────────────────────────
@@ -845,10 +1313,11 @@ function initRenderer() {
   const W = parent.clientWidth;
   const H = parent.clientHeight - 130;
 
-  renderer3D = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer3D = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
   renderer3D.setSize(W, Math.max(H, 280));
   renderer3D.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer3D.setClearColor(0x050505);
+  renderer3D.setClearColor(0xebe1e0, 0); // transparent
+  renderer3D.domElement.style.background = 'transparent';
 
   scene3D = new THREE.Scene();
   camera3D = new THREE.PerspectiveCamera(55, W / Math.max(H, 280), 0.001, 200);
@@ -856,6 +1325,9 @@ function initRenderer() {
 
   setupOrbit(canvas);
   animate();
+
+  // Init minimap after renderer is ready
+  setTimeout(initMinimap, 100);
 }
 
 function setupOrbit(canvas) {
@@ -943,13 +1415,22 @@ function renderPLYToScene(buffer) {
       vertexColors: true,
       sizeAttenuation: true,
     }));
-    pointCloud.scale.set(scale, -scale, scale); // flip Y: SHARP outputs Y-down
+    pointCloud.scale.set(-scale, -scale, scale); // flip X+Y: SHARP outputs mirrored Y-down
     scene3D.add(pointCloud);
 
     document.getElementById('pointCount').innerHTML =
       `<span>${(N / 1000).toFixed(0)}k</span> gaussians`;
 
     addLog('ok', `rendered · ${(N / 1000).toFixed(0)}k points`);
+
+    // Reset camera to centered front view
+    zoom = 2.8;
+    rotX = 0.15; // slight downward tilt for natural perspective
+    rotY = 0;
+    panX = 0; panY = 0;
+    if (camera3D) camera3D.position.z = zoom;
+    pointCloud.rotation.set(rotX, rotY, 0);
+    pointCloud.position.set(0, 0, 0);
 
   } catch (e) {
     addLog('err', `PLY render error: ${e.message}`);
@@ -1216,6 +1697,22 @@ function openSuperSplat() {
   window.open('https://playcanvas.com/supersplat/editor', '_blank');
 }
 
+// ─── INFO TOGGLE ─────────────────────────────────────────────────────────────
+let infoVisible = false;
+function toggleInfo() {
+  infoVisible = !infoVisible;
+  document.getElementById('modalBanner').classList.toggle('visible', infoVisible);
+  document.querySelector('.toggle-btn').textContent = infoVisible ? 'info ▴' : 'info ▾';
+}
+
+// ─── STATUS BADGE ─────────────────────────────────────────────────────────────
+function setStatusBadge(state, text) {
+  const b = document.getElementById('statusBadge');
+  if (!b) return;
+  b.textContent = text;
+  b.className = 'badge ' + state;
+}
+
 // ─── RESIZE ───────────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
   if (!renderer3D || !camera3D) return;
@@ -1247,6 +1744,8 @@ function animate() {
     rotY = pointCloud.rotation.y;
   }
   if (renderer3D && scene3D && camera3D) renderer3D.render(scene3D, camera3D);
+  // Update minimap every 3 frames to save perf
+  if (Math.random() < 0.33) updateMinimap();
 }
 
 
@@ -1363,5 +1862,11 @@ function setDensity(val) {
 }
 
 </script>
+  <div class="share-toast" id="shareToast">
+    <span>Share link:</span>
+    <input type="text" id="shareLinkInput" readonly>
+    <button class="share-toast-copy" onclick="copyShareLink()">Copy</button>
+    <button class="share-toast-close" onclick="closeShareToast()">✕</button>
+  </div>
 </body>
 </html>
