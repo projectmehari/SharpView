@@ -586,6 +586,7 @@
     header { padding: 12px 16px; }
     .scene-id { font-size: 20px; }
     .header-badges { display: none; }
+    .mobile-status-strip { display: flex; }
     .header-coords { display: none; }
 
     /* Left panel: upload zone fills nicely */
@@ -862,7 +863,7 @@
   .action-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: rgba(184,134,74,0.08); }
   .action-btn.share-btn:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); background: rgba(106,138,122,0.08); }
 
-  /* ─── SHARE TOAST ─── */
+  /* ─── SHARE TOAST (desktop) ─── */
   .share-toast {
     position: fixed;
     bottom: 24px;
@@ -877,14 +878,16 @@
     align-items: center;
     gap: 10px;
     opacity: 0;
+    pointer-events: none;
     transition: opacity 0.25s, transform 0.25s;
     z-index: 9999;
     white-space: nowrap;
-    max-width: 90vw;
+    max-width: calc(100vw - 48px);
   }
   .share-toast.visible {
     opacity: 1;
     transform: translateX(-50%) translateY(0);
+    pointer-events: all;
   }
   .share-toast input {
     background: rgba(255,255,255,0.15);
@@ -918,7 +921,115 @@
   }
   .share-toast-copy:hover { background: rgba(255,255,255,0.3); }
 
+  /* ─── SHARE SHEET (mobile bottom sheet) ─── */
+  .share-sheet-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(26,24,20,0.45);
+    z-index: 9998;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .share-sheet-backdrop.visible { display: block; opacity: 1; }
+  .share-sheet {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: var(--bg);
+    border-top: 1px solid var(--glass-border);
+    border-radius: 12px 12px 0 0;
+    padding: 20px 20px calc(20px + env(safe-area-inset-bottom));
+    z-index: 9999;
+    transform: translateY(100%);
+    transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+    font-family: var(--mono);
+  }
+  .share-sheet.visible { transform: translateY(0); }
+  .share-sheet-handle {
+    width: 36px; height: 4px;
+    background: var(--border-bright);
+    border-radius: 2px;
+    margin: 0 auto 20px;
+  }
+  .share-sheet-title {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .share-sheet-url {
+    width: 100%;
+    padding: 10px 12px;
+    background: rgba(255,252,248,0.80);
+    border: 1px solid var(--glass-border);
+    border-radius: 2px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+    outline: none;
+    margin-bottom: 10px;
+    box-sizing: border-box;
+  }
+  .share-sheet-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .share-sheet-copy {
+    flex: 1;
+    padding: 12px;
+    background: var(--text);
+    color: var(--bg);
+    border: none;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+  }
+  .share-sheet-close {
+    padding: 12px 16px;
+    background: transparent;
+    border: 1px solid var(--glass-border);
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--muted);
+    cursor: pointer;
+    border-radius: 2px;
+  }
 
+  @media (max-width: 768px) {
+    /* Hide desktop toast on mobile */
+    .share-toast { display: none !important; }
+  }
+  @media (min-width: 769px) {
+    /* Hide mobile sheet on desktop */
+    .share-sheet, .share-sheet-backdrop { display: none !important; }
+  }
+
+
+
+  /* ─── MOBILE STATUS STRIP ─── */
+  .mobile-status-strip {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--glass-border);
+    background: rgba(255,252,248,0.60);
+    backdrop-filter: blur(16px);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+  }
+  .mobile-status-strip .badge {
+    font-size: 9px;
+    padding: 2px 8px;
+  }
+  .mobile-status-strip .strip-sep {
+    flex: 1;
+  }
 </style>
 </head>
 <body>
@@ -938,6 +1049,15 @@
     <div style="font-size:11px;color:var(--muted)">45.5017° N, 73.5673° W</div>
   </div>
 </header>
+
+<!-- Mobile-only status strip -->
+<div class="mobile-status-strip" id="mobileStatusStrip">
+  <span class="badge complete" id="mobileStatusBadge">Idle</span>
+  <span class="badge docs" onclick="window.open('https://github.com/projectmehari/SharpView','_blank')">GitHub</span>
+  <span class="badge online">● Online</span>
+  <span class="strip-sep"></span>
+  <span style="color:var(--muted);font-size:9px">45.5017° N, 73.5673° W</span>
+</div>
 
 <div class="main">
 
@@ -1767,10 +1887,12 @@ function toggleInfo() {
 
 // ─── STATUS BADGE ─────────────────────────────────────────────────────────────
 function setStatusBadge(state, text) {
-  const b = document.getElementById('statusBadge');
-  if (!b) return;
-  b.textContent = text;
-  b.className = 'badge ' + state;
+  ['statusBadge', 'mobileStatusBadge'].forEach(id => {
+    const b = document.getElementById(id);
+    if (!b) return;
+    b.textContent = text;
+    b.className = 'badge ' + state;
+  });
 }
 
 // ─── RESIZE ───────────────────────────────────────────────────────────────────
@@ -2064,12 +2186,35 @@ function takeScreenshot() {
 function shareLink() {
   if (!currentShareId) return;
   const origin = (window.location.origin === 'null' || window.location.origin.startsWith('file'))
-    ? 'https://ml-sharp.vercel.app'
+    ? 'https://project-sharp-view.vercel.app'
     : window.location.origin;
   const shareUrl = `${origin}?share=${currentShareId}`;
-  document.getElementById('shareLinkInput').value = shareUrl;
-  document.getElementById('shareToast').classList.add('visible');
   addLog('ok', `share link ready · id ${currentShareId}`);
+
+  if (window.innerWidth <= 768) {
+    // Mobile: bottom sheet
+    document.getElementById('shareSheetUrl').value = shareUrl;
+    document.getElementById('shareSheet').classList.add('visible');
+    document.getElementById('shareSheetBackdrop').classList.add('visible');
+  } else {
+    // Desktop: toast
+    document.getElementById('shareLinkInput').value = shareUrl;
+    document.getElementById('shareToast').classList.add('visible');
+  }
+}
+
+function copyShareSheet() {
+  const url = document.getElementById('shareSheetUrl').value;
+  navigator.clipboard.writeText(url).then(() => {
+    const btn = document.getElementById('shareSheetCopyBtn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy Link'; }, 1800);
+  });
+}
+
+function closeShareSheet() {
+  document.getElementById('shareSheet').classList.remove('visible');
+  document.getElementById('shareSheetBackdrop').classList.remove('visible');
 }
 
 function copyShareLink() {
@@ -2159,6 +2304,18 @@ function loadSampleImage() {
 
 
 </script>
+  <!-- Mobile share bottom sheet -->
+  <div class="share-sheet-backdrop" id="shareSheetBackdrop" onclick="closeShareSheet()"></div>
+  <div class="share-sheet" id="shareSheet">
+    <div class="share-sheet-handle"></div>
+    <div class="share-sheet-title">Share Link</div>
+    <input class="share-sheet-url" id="shareSheetUrl" type="text" readonly>
+    <div class="share-sheet-actions">
+      <button class="share-sheet-copy" id="shareSheetCopyBtn" onclick="copyShareSheet()">Copy Link</button>
+      <button class="share-sheet-close" onclick="closeShareSheet()">✕</button>
+    </div>
+  </div>
+
   <div class="share-toast" id="shareToast">
     <span>Share link:</span>
     <input type="text" id="shareLinkInput" readonly>
