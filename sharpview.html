@@ -704,30 +704,36 @@
     }
     .controls-left .ctrl-btn:last-child { border-right: none; }
 
-    /* Row 2: action buttons + zoom */
+    /* Row 2: action buttons + zoom — full-width flush segmented bar */
     .controls-right {
       display: flex;
-      align-items: center;
+      align-items: stretch;
+      width: 100%;
       gap: 0;
       padding: 0;
+      overflow: hidden;
     }
     .viewer-actions {
       display: flex;
       flex: 1;
+      min-width: 0;
       gap: 0;
     }
     .action-btn {
       flex: 1;
+      min-width: 0;
       border-radius: 0;
-      border-top: none;
-      border-left: none;
-      border-bottom: none;
+      border: none;
       border-right: 1px solid var(--glass-border);
-      padding: 10px 4px;
+      padding: 11px 2px;
       font-size: 9px;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.04em;
       white-space: nowrap;
       text-align: center;
+      background: rgba(234,230,222,0.70);
+    }
+    .viewer-actions .action-btn:last-child {
+      border-right: none;
     }
     .zoom-btns {
       display: flex;
@@ -736,12 +742,13 @@
       border-left: 1px solid var(--glass-border);
     }
     .zoom-btn {
-      width: 36px;
-      height: 40px;
+      width: 34px;
+      height: auto;
       border-radius: 0;
       border: none;
       border-right: 1px solid var(--glass-border);
-      font-size: 16px;
+      font-size: 15px;
+      background: rgba(234,230,222,0.70);
     }
     .zoom-btn:last-child { border-right: none; }
     .point-count { display: none; }
