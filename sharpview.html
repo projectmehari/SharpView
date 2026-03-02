@@ -952,6 +952,33 @@
 
 
 
+  /* ─── OUTAGE NOTICE BANNER ─── */
+  .notice-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 8px 20px;
+    background: rgba(192,64,64,0.07);
+    border-bottom: 1px solid rgba(192,64,64,0.20);
+    font-size: 11px;
+    color: var(--danger);
+    letter-spacing: 0.05em;
+    text-align: center;
+    flex-wrap: wrap;
+    position: relative;
+    z-index: 10;
+  }
+  .notice-banner a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px solid rgba(184,134,74,0.40);
+    transition: border-color 0.15s, color 0.15s;
+    font-weight: 500;
+  }
+  .notice-banner a:hover { color: var(--accent-warm); border-color: var(--accent-warm); }
+  .notice-banner-icon { font-size: 12px; flex-shrink: 0; }
+
   /* ─── MOBILE STATUS STRIP ─── */
   .mobile-status-strip {
     display: none;
@@ -986,17 +1013,25 @@
     <div class="header-badges">
       <span class="badge complete" id="statusBadge">Idle</span>
       <span class="badge docs" onclick="window.open('https://github.com/projectmehari/SharpView','_blank')">GitHub</span>
-      <span class="badge online">Online</span>
+      <span class="badge" style="border-color:rgba(192,64,64,0.30);background:rgba(192,64,64,0.07);color:var(--danger);cursor:pointer;" onclick="window.open('https://huggingface.co/spaces/verymehari/SharpView','_blank')" title="Use Hugging Face mirror">Unavailable · HF Mirror ↗</span>
     </div>
     <div style="font-size:11px;color:var(--muted)">45.5017° N, 73.5673° W</div>
   </div>
 </header>
 
+<!-- Outage Notice Banner -->
+<div class="notice-banner">
+  <span class="notice-banner-icon">⚠</span>
+  <span>Modal GPU credits temporarily exhausted — inference is unavailable.</span>
+  <span>Try the live demo on</span>
+  <a href="https://huggingface.co/spaces/verymehari/SharpView" target="_blank" rel="noopener">Hugging Face Spaces →</a>
+</div>
+
 <!-- Mobile-only status strip -->
 <div class="mobile-status-strip" id="mobileStatusStrip">
   <span class="badge complete" id="mobileStatusBadge">Idle</span>
   <span class="badge docs" onclick="window.open('https://github.com/projectmehari/SharpView','_blank')">GitHub</span>
-  <span class="badge online">● Online</span>
+  <span class="badge" style="border-color:rgba(192,64,64,0.30);background:rgba(192,64,64,0.07);color:var(--danger);cursor:pointer;" onclick="window.open('https://huggingface.co/spaces/verymehari/SharpView','_blank')">Unavailable · HF ↗</span>
   <span class="strip-sep"></span>
   <span style="color:var(--muted);font-size:9px">45.5017° N, 73.5673° W</span>
 </div>
